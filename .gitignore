@@ -1,0 +1,39 @@
+# Build artifacts
+build/
+bin/
+*.o
+*.obj
+*.a
+*.lib
+*.dll
+*.exe
+*.so
+*.dylib
+
+# IDE
+.vscode/
+.idea/
+*.vcxproj
+*.vcxproj.filters
+*.sln
+*.vs/
+CMakeSettings.json
+
+# Generated
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Environment
+node.id
+storage/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Dependencies
+.ninja_deps
+.ninja_log
