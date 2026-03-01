@@ -46,7 +46,7 @@ int main(int argc, char* argv[]) {
         
         // Bootstrap nodes
         std::vector<std::string> bootstrapNodes = {
-            "127.0.0.1:6882"
+            "192.168.68.106:6882"
         };
         
         g_node->bootstrap(bootstrapNodes);
@@ -82,8 +82,8 @@ int main(int argc, char* argv[]) {
                 }
             } else if (line.substr(0, 10) == "/download ") {
                 std::string hashStr = line.substr(10);
-                auto hash = p2p::SHA256::fromHex(hashStr);
-                g_node->downloadFile(hash, "./downloads");
+                auto hash = p2p::SHA256::fromHex(hashStr);                // ensure downloads directory exists
+                std::filesystem::create_directories("./downloads");                g_node->downloadFile(hash, "./downloads");
             } else if (!line.empty()) {
                 std::cout << "Unknown command. Type /help for help." << std::endl;
             }

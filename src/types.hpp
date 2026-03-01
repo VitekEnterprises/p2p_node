@@ -16,6 +16,14 @@
 #include <netdb.h>
 #endif
 
+// Cross-platform socket type definitions
+#ifndef _WIN32
+typedef int SOCKET;
+#define INVALID_SOCKET (-1)
+#define SOCKET_ERROR (-1)
+#define closesocket(fd) close(fd)
+#endif
+
 #include <cstdint>
 #include <array>
 #include <vector>

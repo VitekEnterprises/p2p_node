@@ -91,7 +91,8 @@ The resulting binary will be in `build/bin/p2p_node`
 /status - Node status
 /nodes - Number of nodes in table
 /share <file> - Share file (add to network)
-/download <hash> - Download file (specify SHA256)
+/download <hash> - Download file (specify SHA256 of shared file)
+# The hash is printed when you or another node shares a file
 /exit - Exit program
 ```
 

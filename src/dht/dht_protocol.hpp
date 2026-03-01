@@ -13,6 +13,24 @@ namespace p2p {
 
 class DHTProtocol {
 public:
+    // small in-memory store for shared values (files) to support download
+    struct Sha256HashHash {
+        size_t operator()(const Sha256Hash& h) const noexcept {
+            // combine 4 uint64_t chunks
+            const uint64_t* p = reinterpret_cast<const uint64_t*>(h.data());
+            return p[0] ^ p[1] ^ p[2] ^ p[3];
+        }
+    };
+    struct Sha256HashEq {
+        bool operator()(const Sha256Hash& a, const Sha256Hash& b) const noexcept {
+            return a == b;
+        }
+    };
+
+private:
+    std::unordered_map<Sha256Hash, std::vector<uint8_t>, Sha256HashHash, Sha256HashEq> valueStore_; // hash->raw data
+
+public:
     using FoundNodeCallback = std::function<void(const std::vector<NodeInfo>&)>;
     using FoundValueCallback = std::function<void(const std::vector<uint8_t>&)>;
     
@@ -115,6 +133,9 @@ public:
     }
     
     void store(const Sha256Hash& hash, const std::vector<uint8_t>& data) {
+        // keep local copy so we can answer FIND_VALUE
+        valueStore_[hash] = data;
+
         auto closest = routingTable_.findClosest(hash, 8);
         for (const auto& node : closest) {
             auto packet = PacketSerializer::createStore(selfId_, hash, data);
@@ -233,6 +254,15 @@ private:
         Sha256Hash hash;
         std::copy(payload.begin(), payload.begin() + 32, hash.begin());
         
+        // if we have the value locally, reply with it
+        auto it = valueStore_.find(hash);
+        if (it != valueStore_.end()) {
+            auto packet = PacketSerializer::createFoundValue(selfId_, hash, it->second);
+            socket_.sendTo(packet.data(), packet.size(), addr);
+            return;
+        }
+
+        // otherwise just return closest nodes
         auto closest = routingTable_.findClosest(hash, 8);
         auto packet = PacketSerializer::createFoundNodes(selfId_, closest);
         socket_.sendTo(packet.data(), packet.size(), addr);
@@ -240,7 +270,25 @@ private:
     
     void handleFoundValue(const NodeId& sender, const sockaddr_in& addr,
                           const std::vector<uint8_t>& payload) {
-        // TODO: Handle found value
+        if (payload.size() < 32 + 4) return;
+        Sha256Hash hash;
+        std::copy(payload.begin(), payload.begin() + 32, hash.begin());
+        
+        uint32_t len = (payload[32] << 24) | (payload[33] << 16) |
+                       (payload[34] << 8) | payload[35];
+        if (payload.size() < 36 + len) return;
+        std::vector<uint8_t> data(payload.begin() + 36, payload.begin() + 36 + len);
+        
+        // find pending query and invoke callback
+        for (auto it = pendingQueries_.begin(); it != pendingQueries_.end(); ++it) {
+            if (it->second.type == PendingQuery::FIND_VALUE && it->second.target == hash) {
+                if (it->second.valueCallback) {
+                    it->second.valueCallback(data);
+                }
+                pendingQueries_.erase(it);
+                break;
+            }
+        }
     }
     
     void handleStore(const NodeId& sender, const sockaddr_in& addr,
@@ -256,8 +304,9 @@ private:
         if (payload.size() < 36 + len) return;
         
         std::vector<uint8_t> data(payload.begin() + 36, payload.begin() + 36 + len);
-        
-        auto packet = PacketSerializer::createStored(selfId_, hash);
+                // store locally so we can serve later
+        valueStore_[hash] = data;
+                auto packet = PacketSerializer::createStored(selfId_, hash);
         socket_.sendTo(packet.data(), packet.size(), addr);
     }
     

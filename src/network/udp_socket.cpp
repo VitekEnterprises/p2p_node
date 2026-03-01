@@ -40,8 +40,13 @@ bool UDPSocket::init() {
     
     // Allow reuse
     int reuse = 1;
+#ifdef _WIN32
     if (setsockopt(sockfd_, SOL_SOCKET, SO_REUSEADDR, 
                    reinterpret_cast<const char*>(&reuse), sizeof(reuse)) < 0) {
+#else
+    if (setsockopt(sockfd_, SOL_SOCKET, SO_REUSEADDR, 
+                   &reuse, sizeof(reuse)) < 0) {
+#endif
         Logger::warn("Failed to set SO_REUSEADDR");
     }
     

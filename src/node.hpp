@@ -97,19 +97,38 @@ public:
     
     bool shareFile(const std::string& filepath) {
         FileMetadata metadata;
-        return blockStore_.storeFile(filepath, metadata);
+        if (!blockStore_.storeFile(filepath, metadata)) {
+            return false;
+        }
+        // inform user of the hash needed for download
+        std::string hashStr = SHA256::toHex(metadata.fileHash);
+        Logger::info("Shared file hash: " + hashStr);
+
+        // read file contents into memory and store in DHT
+        std::ifstream in(filepath, std::ios::binary);
+        if (in) {
+            std::vector<uint8_t> data((std::istreambuf_iterator<char>(in)),
+                                      std::istreambuf_iterator<char>());
+            dht_.store(metadata.fileHash, data);
+        }
+
+        return true;
     }
     
     void downloadFile(const Sha256Hash& fileHash, const std::string& savePath) {
         dht_.findValue(fileHash, [this, fileHash, savePath](const std::vector<uint8_t>& data) {
             if (data.empty()) {
-                Logger::warn("File not found");
+                Logger::warn("File not found in network");
                 return;
             }
             
-            std::string output;
-            if (blockStore_.loadFile(fileHash, output)) {
-                Logger::info("File downloaded to: " + output);
+            std::string outFile = savePath + "/" + SHA256::toHex(fileHash);
+            std::ofstream out(outFile, std::ios::binary);
+            if (out) {
+                out.write(reinterpret_cast<const char*>(data.data()), data.size());
+                Logger::info("File downloaded to: " + outFile);
+            } else {
+                Logger::error("Failed to open output file: " + outFile);
             }
         });
     }
