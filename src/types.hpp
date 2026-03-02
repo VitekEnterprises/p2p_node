@@ -71,6 +71,7 @@ struct Block {
 struct FileMetadata {
     Sha256Hash fileHash;
     uint32_t totalBlocks;
+    uint32_t blockSize{0};
     std::vector<Sha256Hash> blockHashes;
     std::string filename;
     uint64_t filesize;

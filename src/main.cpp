@@ -36,8 +36,10 @@ void printHelp() {
               << "  /status         - Show node status\n"
               << "  /nodes          - Show routing table size\n"
               << "  /hashes         - Show all shared file hashes with download counts\n"
-              << "  /downloaded     - Show downloaded files\n"
-              << "  /shared         - Show shared files\n"
+              << "                   (persisted in hashes.dat, updated every minute)\n"
+              << "  /downloaded     - Show downloaded files (stored in downloaded.dat)\n"
+              << "  /shared         - Show shared files (stored in shared.dat)\n"
+              << "  /users          - Show known hardwareID->nickname mappings (users.dat)\n"
               << "  /find <hash>    - Find who online has a specific file\n"
               << "  /share <file> [public|private]   - Share a file\n"
               << "  /download <hash> - Download a file\n"
@@ -101,6 +103,8 @@ int main(int argc, char* argv[]) {
     
     if (argc > 1) port = std::atoi(argv[1]);
     if (argc > 2) storagePath = argv[2];
+    // make sure storage directory is available
+    std::filesystem::create_directories(storagePath);
     
     try {
         auto node = std::make_unique<p2p::P2PNode>(port, storagePath);
@@ -147,62 +151,25 @@ int main(int argc, char* argv[]) {
         std::cout << "[*] MAC address: " << g_node->getMacAddress() << std::endl;
         std::cout << "[*] Hardware ID: " << g_node->getHardwareId() << std::endl;
         
-        // load user registry from persistence (simple format: hwid|nick)
-        std::string userFile = storagePath + "/users.txt";
-        std::unordered_map<std::string, std::string> savedUsers;
-        try {
-            std::ifstream uf(userFile);
-            if (uf.good()) {
-                std::string line;
-                while (std::getline(uf, line)) {
-                    size_t sep = line.find('|');
-                    if (sep != std::string::npos) {
-                        std::string hwid = line.substr(0, sep);
-                        std::string nick = line.substr(sep + 1);
-                        savedUsers[hwid] = nick;
-                    }
-                }
-                g_node->loadUserRegistry(savedUsers);
-            }
-        } catch (...) {
-            // ignore load errors
-        }
-        
-        // synchronize with peers and resolve nickname
+        // load registry from disk; node will handle merging/obfuscation
+        g_node->loadUsersFromDisk();
+
+        // perform initial user sync with peers as well
         g_node->syncUserRegistry();
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        
+
         std::string myHwid = g_node->getHardwareId();
         std::string myNick = g_node->getUserNick(myHwid);
-        
         if (myNick.empty()) {
-            // check local saved users
-            auto it = savedUsers.find(myHwid);
-            if (it != savedUsers.end()) {
-                myNick = it->second;
-                std::cout << "[*] Loaded nickname from history: " << myNick << std::endl;
-            } else {
-                // ask user to set one
-                std::cout << "Enter your nickname: ";
-                std::getline(std::cin, myNick);
-                if (myNick.empty()) myNick = "User";
-            }
+            std::cout << "Enter your nickname: ";
+            std::getline(std::cin, myNick);
+            if (myNick.empty()) myNick = "User";
+            g_node->announceMyself(myHwid, myNick);
+            g_node->persistUserRegistryToDisk();
         } else {
             std::cout << "[*] Using known nickname: " << myNick << std::endl;
-        }
-        
-        // announce ourselves
-        g_node->announceMyself(myHwid, myNick);
-        savedUsers[myHwid] = myNick;
-        
-        // save user registry
-        try {
-            std::ofstream uf(userFile);
-            for (const auto& p : savedUsers) {
-                uf << p.first << "|" << p.second << "\n";
-            }
-        } catch (...) {
-            // ignore save errors
+            // announce again so others learn our presence
+            g_node->announceMyself(myHwid, myNick);
         }
         
         // synchronize hash table with peers
@@ -230,33 +197,94 @@ int main(int argc, char* argv[]) {
                 if (stats.empty()) {
                     std::cout << "No known hashes\n";
                 } else {
-                    std::cout << "Known file hashes (filename, downloads, last seen):\n";
+                    std::cout << "\n=== Known File Hashes ===\n";
+                    std::cout << "--------------------------------------------------------------------------------\n";
+                    std::cout << " Filename                      | Hash (SHA-256)                                                      | Downloads | Last Seen\n";
+                    std::cout << "-------------------------------|--------------------------------------------------------------------|-----------|----------------\n";
+                    
                     for (auto &e : stats) {
-                        std::cout << "  " << e.filename << " | " << e.hashStr.substr(0, 65) << "..." 
-                                 << " | downloads=" << e.downloadCount 
-                                 << " | " << e.lastSeen << "\n";
+                        // Format filename (max 30 chars)
+                        std::string filename = e.filename;
+                        if (filename.length() > 30) {
+                            filename = filename.substr(0, 27) + "...";
+                        }
+                        
+                        // Format last seen
+                        std::string lastSeen = e.lastSeen;
+                        if (lastSeen.length() > 16) {
+                            lastSeen = lastSeen.substr(0, 16);
+                        }
+                        
+                        // Print row with full hash
+                        std::cout << " " << std::left << std::setw(30) << filename 
+                                << " | " << e.hashStr 
+                                << " | " << std::right << std::setw(9) << e.downloadCount 
+                                << " | " << lastSeen << "\n";
                     }
+                    std::cout << "--------------------------------------------------------------------------------\n";
+                    std::cout << "Total hashes: " << stats.size() << "\n\n";
                 }
+                
             } else if (line == "/downloaded") {
                 auto files = g_node->getDownloadedFiles();
                 if (files.empty()) {
                     std::cout << "No downloaded files\n";
                 } else {
-                    std::cout << "Downloaded files:\n";
+                    std::cout << "\n=== Downloaded Files ===\n";
+                    std::cout << "--------------------------------------------------------------------------------\n";
+                    std::cout << " Filename                      | Hash (SHA-256)                                                      \n";
+                    std::cout << "-------------------------------|--------------------------------------------------------------------\n";
+                    
                     for (const auto& f : files) {
-                        std::cout << "  " << f.first << " (hash: " << f.second.substr(0, 65) << "...)\n";
+                        // Format filename (max 30 chars)
+                        std::string filename = f.first;
+                        if (filename.length() > 30) {
+                            filename = filename.substr(0, 27) + "...";
+                        }
+                        
+                        std::cout << " " << std::left << std::setw(30) << filename 
+                                << " | " << f.second << "\n";  // Full hash
                     }
+                    std::cout << "--------------------------------------------------------------------------------\n";
+                    std::cout << "Total files: " << files.size() << "\n\n";
                 }
+                
             } else if (line == "/shared") {
                 auto files = g_node->getSharedFiles();
                 if (files.empty()) {
                     std::cout << "No shared files\n";
                 } else {
-                    std::cout << "Shared files:\n";
+                    std::cout << "\n=== Shared Files ===\n";
+                    std::cout << "--------------------------------------------------------------------------------\n";
+                    std::cout << " Filename                      | Hash (SHA-256)                                                      \n";
+                    std::cout << "-------------------------------|--------------------------------------------------------------------\n";
+                    
                     for (const auto& f : files) {
-                        std::cout << "  " << f.first << " (hash: " << f.second.substr(0, 65) << "...)\n";
+                        // Format filename (max 30 chars)
+                        std::string filename = f.first;
+                        if (filename.length() > 30) {
+                            filename = filename.substr(0, 27) + "...";
+                        }
+                        
+                        std::cout << " " << std::left << std::setw(30) << filename 
+                                << " | " << f.second << "\n";  // Full hash
                     }
+                    std::cout << "--------------------------------------------------------------------------------\n";
+                    std::cout << "Total files: " << files.size() << "\n\n";
                 }
+            
+            } else if (line == "/users") {
+                auto users = g_node->getAllUsers();
+                if (users.empty()) {
+                    std::cout << "No known users\n";
+                } else {
+                    std::cout << "\n=== Known Users ===\n";
+                    for (const auto &u : users) {
+                        std::cout << " " << u.first << " -> " << u.second << "\n";
+                    }
+                    std::cout << "Total users: " << users.size() << "\n\n";
+                }
+
             } else if (line.substr(0, 6) == "/find ") {
                 std::string hashStr = line.substr(6);
                 auto hash = p2p::SHA256::fromHex(hashStr);

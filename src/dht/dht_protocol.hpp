@@ -134,6 +134,10 @@ public:
             case MSG_CHAT:
                 handleChat(senderId, sender, payload);
                 break;
+            case MSG_REQUEST_BLOCK:
+            case MSG_SEND_BLOCK:
+                // handled at P2PNode level (block transfer path)
+                break;
             default:
                 Logger::debug("Unknown message type: " + std::to_string(type));
         }
@@ -554,15 +558,19 @@ private:
         pos += 32;
         // update hash table without logging to console
         auto& info = hashTable_[hash];
-        // add owner if not already present
-        bool found = false;
-        for (auto &a : info.owners) {
-            if (a.sin_addr.s_addr == addr.sin_addr.s_addr && a.sin_port == addr.sin_port) {
-                found = true;
-                break;
+        // ignore obviously invalid addresses (loopback/any); they are not useful
+        if (addr.sin_addr.s_addr != htonl(INADDR_LOOPBACK) &&
+            addr.sin_addr.s_addr != htonl(INADDR_ANY)) {
+            // add owner if not already present
+            bool found = false;
+            for (auto &a : info.owners) {
+                if (a.sin_addr.s_addr == addr.sin_addr.s_addr && a.sin_port == addr.sin_port) {
+                    found = true;
+                    break;
+                }
             }
+            if (!found) info.owners.push_back(addr);
         }
-        if (!found) info.owners.push_back(addr);
         info.lastSeen = std::chrono::system_clock::now();
     }
 
@@ -582,14 +590,18 @@ private:
             std::copy(payload.begin() + pos, payload.begin() + pos + 32, hash.begin());
             pos += 32;
             auto& info = hashTable_[hash];
-            bool found = false;
-            for (auto &a : info.owners) {
-                if (a.sin_addr.s_addr == addr.sin_addr.s_addr && a.sin_port == addr.sin_port) {
-                    found = true;
-                    break;
+            // only record address if it isn't loopback/any
+            if (addr.sin_addr.s_addr != htonl(INADDR_LOOPBACK) &&
+                addr.sin_addr.s_addr != htonl(INADDR_ANY)) {
+                bool found = false;
+                for (auto &a : info.owners) {
+                    if (a.sin_addr.s_addr == addr.sin_addr.s_addr && a.sin_port == addr.sin_port) {
+                        found = true;
+                        break;
+                    }
                 }
+                if (!found) info.owners.push_back(addr);
             }
-            if (!found) info.owners.push_back(addr);
             info.lastSeen = std::chrono::system_clock::now();
         }
     }
