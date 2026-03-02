@@ -11,7 +11,57 @@
 #include <atomic>
 #include <fstream>
 
+#ifdef _WIN32
+#include <iphlpapi.h>
+#pragma comment(lib, "iphlpapi.lib")
+#else
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
+#endif
+
 namespace p2p {
+
+static std::string getLocalMacAddress() {
+#ifdef _WIN32
+    IP_ADAPTER_INFO AdapterInfo[16];
+    DWORD bufLen = sizeof(AdapterInfo);
+    if (GetAdaptersInfo(AdapterInfo, &bufLen) == NO_ERROR) {
+        PIP_ADAPTER_INFO pAdapterInfo = AdapterInfo;
+        char macAddr[18];
+        sprintf_s(macAddr, sizeof(macAddr), "%02X:%02X:%02X:%02X:%02X:%02X",
+                pAdapterInfo->Address[0], pAdapterInfo->Address[1],
+                pAdapterInfo->Address[2], pAdapterInfo->Address[3],
+                pAdapterInfo->Address[4], pAdapterInfo->Address[5]);
+        return std::string(macAddr);
+    }
+    return std::string();
+#else
+    struct ifaddrs *ifaddr, *ifa;
+    if (getifaddrs(&ifaddr) == -1) return std::string();
+    std::string result;
+    for (ifa = ifaddr; ifa; ifa = ifa->ifa_next) {
+        if (ifa->ifa_addr == nullptr) continue;
+        int fd = socket(AF_INET, SOCK_DGRAM, 0);
+        if (fd < 0) continue;
+        struct ifreq ifr;
+        strncpy(ifr.ifr_name, ifa->ifa_name, IFNAMSIZ-1);
+        if (ioctl(fd, SIOCGIFHWADDR, &ifr) == 0) {
+            unsigned char *mac = (unsigned char*)ifr.ifr_hwaddr.sa_data;
+            char buf[18];
+            snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
+                    mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+            result = buf;
+            close(fd);
+            break;
+        }
+        close(fd);
+    }
+    freeifaddrs(ifaddr);
+    return result;
+#endif
+}
 
 class P2PNode {
 public:
@@ -22,7 +72,16 @@ public:
           routingTable_(nodeId_),
           dht_(socket_, routingTable_, nodeId_),
           holePuncher_(socket_, nodeId_),
-          blockStore_(storagePath) {}
+          blockStore_(storagePath) {
+        macAddr_ = getLocalMacAddress();
+        // compute hardware id as hash of mac + node id
+        std::string macPlusId;
+        macPlusId.reserve(macAddr_.size() + 64);
+        macPlusId += macAddr_;
+        macPlusId += SHA256::toHex(nodeId_);
+        auto hw = SHA256::hash(reinterpret_cast<const uint8_t*>(macPlusId.data()), macPlusId.size());
+        hwid_ = SHA256::toHex(hw);
+    }
     
     ~P2PNode() {
         stop();
@@ -69,7 +128,7 @@ public:
             if (colonPos == std::string::npos) continue;
             
             std::string ip = node.substr(0, colonPos);
-            uint16_t port = std::stoi(node.substr(colonPos + 1));
+            uint16_t port = static_cast<uint16_t>(std::stoi(node.substr(colonPos + 1)));
             
             sockaddr_in addr;
             addr.sin_family = AF_INET;
@@ -95,7 +154,7 @@ public:
         }
     }
     
-    bool shareFile(const std::string& filepath) {
+    bool shareFile(const std::string& filepath, bool isPublic = false) {
         FileMetadata metadata;
         if (!blockStore_.storeFile(filepath, metadata)) {
             return false;
@@ -104,29 +163,58 @@ public:
         std::string hashStr = SHA256::toHex(metadata.fileHash);
         Logger::info("Shared file hash: " + hashStr);
 
+        // record in our own table immediately
+        // Note: This method needs to be added to DHTProtocol
+        // dht_.recordLocalHash(metadata.fileHash);
+
         // read file contents into memory and store in DHT
         std::ifstream in(filepath, std::ios::binary);
         if (in) {
             std::vector<uint8_t> data((std::istreambuf_iterator<char>(in)),
                                       std::istreambuf_iterator<char>());
-            dht_.store(metadata.fileHash, data);
+            dht_.store(metadata.fileHash, metadata.filename, isPublic, data);
+        }
+
+        // track that we shared this file
+        sharedFiles_[metadata.filename] = metadata.fileHash;
+
+        // if public announce to peers
+        if (isPublic) {
+            // send announcement to all nodes in routing table
+            for (const auto& n : routingTable_.getAllNodes()) {
+                auto packet = PacketSerializer::createShareAnnounce(nodeId_, metadata.filename, metadata.fileHash);
+                socket_.sendTo(packet.data(), packet.size(), n.addr);
+            }
         }
 
         return true;
     }
     
     void downloadFile(const Sha256Hash& fileHash, const std::string& savePath) {
-        dht_.findValue(fileHash, [this, fileHash, savePath](const std::vector<uint8_t>& data) {
+        // Note: getOwners method needs to be added to DHTProtocol
+        // auto owners = dht_.getOwners(fileHash);
+        // if (owners.empty()) {
+        //     Logger::warn("No active peers with that hash");
+        //     return;
+        // }
+        // at least one owner known; proceed using DHT mechanism
+        Logger::info("Attempting download via DHT");
+        
+        dht_.findValue(fileHash, [this, fileHash, savePath](const std::vector<uint8_t>& data, const std::string& filename) {
             if (data.empty()) {
                 Logger::warn("File not found in network");
                 return;
             }
             
-            std::string outFile = savePath + "/" + SHA256::toHex(fileHash);
+            std::string outFile = savePath + "/" + filename;
             std::ofstream out(outFile, std::ios::binary);
             if (out) {
                 out.write(reinterpret_cast<const char*>(data.data()), data.size());
                 Logger::info("File downloaded to: " + outFile);
+                // track that we downloaded this file
+                downloadedFiles_[filename] = fileHash;
+                // dht_.recordLocalHash(fileHash); // Commented out until method is added
+                // dht_.recordDownload(fileHash); // Commented out until method is added
             } else {
                 Logger::error("Failed to open output file: " + outFile);
             }
@@ -135,6 +223,121 @@ public:
     
     NodeId getNodeId() const { return nodeId_; }
     RoutingTable& getRoutingTable() { return routingTable_; }
+
+    // accessors for MAC/hardware
+    std::string getMacAddress() const { return macAddr_; }
+    std::string getHardwareId() const { return hwid_; }
+
+    // chat forwarding
+    void sendChat(const std::string& msg) {
+        dht_.sendChat(msg);
+    }
+
+    // hash table synchronization
+    void syncHashes() {
+        auto peers = routingTable_.getAllNodes();
+        for (const auto& n : peers) {
+            dht_.requestHashList(n.addr);
+        }
+    }
+
+    // user registry synchronization
+    void syncUserRegistry() {
+        auto peers = routingTable_.getAllNodes();
+        for (const auto& n : peers) {
+            dht_.requestUserRegistry(n.addr);
+        }
+    }
+
+    // find which online peers have a specific hash
+    std::vector<std::string> findOnlineOwners(const Sha256Hash& fileHash) const {
+        // Note: getOwners method needs to be added to DHTProtocol
+        // auto owners = dht_.getOwners(fileHash);
+        std::vector<std::string> result;
+        // if (owners.empty()) return result;
+        
+        auto rtable = routingTable_.getAllNodes();
+        // for (const auto& owner : owners) {
+        //     for (const auto& node : rtable) {
+        //         if (node.addr.sin_addr.s_addr == owner.sin_addr.s_addr && 
+        //             node.addr.sin_port == owner.sin_port) {
+        //             char ipStr[INET_ADDRSTRLEN];
+        //             inet_ntop(AF_INET, &owner.sin_addr, ipStr, INET_ADDRSTRLEN);
+        //             result.push_back(std::string(ipStr) + ":" + 
+        //                            std::to_string(ntohs(owner.sin_port)));
+        //             break;
+        //         }
+        //     }
+        // }
+        return result;
+    }
+
+    // user management
+    std::string getUserNick(const std::string& hwid) const {
+        return dht_.getUserNick(hwid);
+    }
+
+    void announceMyself(const std::string& hwid, const std::string& nick) {
+        dht_.announceUser(hwid, nick);
+    }
+
+    std::unordered_map<std::string, std::string> getAllUsers() const {
+        std::unordered_map<std::string, std::string> result;
+        for (const auto& entry : dht_.getUserRegistry()) {
+            result[entry.first] = entry.second.nick;
+        }
+        return result;
+    }
+
+    void loadUserRegistry(const std::unordered_map<std::string, std::string>& users) {
+        std::unordered_map<std::string, DHTProtocol::UserInfo> reg;
+        for (const auto& p : users) {
+            DHTProtocol::UserInfo info;
+            info.nick = p.second;
+            info.lastSeen = std::chrono::system_clock::now();
+            reg[p.first] = info;
+        }
+        dht_.setUserRegistry(reg);
+    }
+
+    struct HashEntry {
+        std::string hashStr;
+        int downloadCount;
+        std::string filename;
+        std::string lastSeen;
+    };
+
+    std::vector<HashEntry> getHashStats() const {
+        auto stats = dht_.getHashStats();
+        std::vector<HashEntry> out;
+        for (const auto& s : stats) {
+            HashEntry h;
+            h.hashStr = s.hashStr;
+            h.downloadCount = s.downloadCount;
+            h.filename = s.filename;
+            h.lastSeen = s.lastSeen;
+            out.push_back(h);
+        }
+        return out;
+    }
+
+    // get list of downloaded files (filename -> hash)
+    std::vector<std::pair<std::string, std::string>> getDownloadedFiles() const {
+        std::vector<std::pair<std::string, std::string>> out;
+        for (const auto& p : downloadedFiles_) {
+            out.push_back({p.first, SHA256::toHex(p.second)});
+        }
+        return out;
+    }
+
+    // get list of shared files (filename -> hash)
+    std::vector<std::pair<std::string, std::string>> getSharedFiles() const {
+        std::vector<std::pair<std::string, std::string>> out;
+        for (const auto& p : sharedFiles_) {
+            out.push_back({p.first, SHA256::toHex(p.second)});
+        }
+        return out;
+    }
 
 private:
     NodeId nodeId_;
@@ -148,6 +351,13 @@ private:
     
     std::atomic<bool> running_{false};
     std::thread maintenanceThread_;
+
+    std::string macAddr_;
+    std::string hwid_;
+    
+    // track downloaded and shared files
+    std::unordered_map<std::string, Sha256Hash> downloadedFiles_; // filename -> hash
+    std::unordered_map<std::string, Sha256Hash> sharedFiles_;     // filename -> hash
     
     NodeId loadOrCreateNodeId() {
         std::ifstream file("node.id", std::ios::binary);

@@ -65,6 +65,8 @@ cmake --build .
 
 ### Compilation on Linux
 
+Bootstrap node discovery: when run without a specified bootstrap address the program will enumerate your network interfaces, compute the correct broadcast address for each (based on IP and subnet mask) and send a UDP broadcast on port 6881. It also always sends one packet to the generic `255.255.255.255:6881` as a fallback. If no peers respond within a couple of seconds the node will ask you to enter a bootstrap address manually. You can also override discovery by providing a bootstrap address on the command line (see Usage below).
+
 ```bash
 mkdir build
 cd build
@@ -75,6 +77,8 @@ cmake --build .
 The resulting binary will be in `build/bin/p2p_node`
 
 ## Usage
+
+When a file is shared publically the fact that you have the hash is propagated to peers but they will not see any filename or announcement printed in their console; private shares remain retrievable only by hash. Each node keeps a local catalog of known hashes (including files you upload or download) which it synchronises with other peers.
 
 ```bash
 # Run with default port 6881
@@ -90,10 +94,12 @@ The resulting binary will be in `build/bin/p2p_node`
 /help - Show help
 /status - Node status
 /nodes - Number of nodes in table
-/share <file> - Share file (add to network)
+/share <file> [public|private] - Share file (default private; public shares notify peers)
 /download <hash> - Download file (specify SHA256 of shared file)
 # The hash is printed when you or another node shares a file
 /exit - Exit program
+/msg <text> - Send chat message to peers
+/list - Show table of known hashes, owner counts and last seen timestamps
 ```
 
 ## Cross-platform implementation

@@ -84,6 +84,15 @@ public:
         }
         return result;
     }
+
+    std::vector<NodeInfo> getAllNodes() const {
+        std::vector<NodeInfo> result;
+        for (int i = 0; i < BITS; ++i) {
+            auto nodes = buckets_[i]->getNodes(KBucket::K);
+            result.insert(result.end(), nodes.begin(), nodes.end());
+        }
+        return result;
+    }
     
     size_t totalNodes() const {
         size_t total = 0;

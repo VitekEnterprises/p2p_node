@@ -49,6 +49,14 @@ bool UDPSocket::init() {
 #endif
         Logger::warn("Failed to set SO_REUSEADDR");
     }
+
+    // enable broadcast on socket
+    int broadcast = 1;
+#ifdef _WIN32
+    setsockopt(sockfd_, SOL_SOCKET, SO_BROADCAST, reinterpret_cast<const char*>(&broadcast), sizeof(broadcast));
+#else
+    setsockopt(sockfd_, SOL_SOCKET, SO_BROADCAST, &broadcast, sizeof(broadcast));
+#endif
     
     // Bind
     sockaddr_in addr;
@@ -97,11 +105,12 @@ bool UDPSocket::sendTo(const uint8_t* data, size_t len, const sockaddr_in& dest)
     if (sent == SOCKET_ERROR) {
 #ifdef _WIN32
         int err = WSAGetLastError();
-        if (err != WSAEWOULDBLOCK) {
+        // ignore "destination address required" and nonblocking
+        if (err != WSAEWOULDBLOCK && err != 10040) {
             Logger::error("Send failed: " + std::to_string(err));
         }
 #else
-        if (errno != EAGAIN && errno != EWOULDBLOCK) {
+        if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EDESTADDRREQ) {
             Logger::error("Send failed: " + std::string(strerror(errno)));
         }
 #endif

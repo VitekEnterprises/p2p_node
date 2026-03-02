@@ -244,7 +244,7 @@ int main(int argc, char* argv[]) {
                 } else {
                     std::cout << "Downloaded files:\n";
                     for (const auto& f : files) {
-                        std::cout << "  " << f.first << " (hash: " << f.second.substr(0, 65) << "...)\n";
+                        std::cout << "  " << f.first << " (hash: " << f.second.substr(0, 16) << "...)\n";
                     }
                 }
             } else if (line == "/shared") {
@@ -254,7 +254,7 @@ int main(int argc, char* argv[]) {
                 } else {
                     std::cout << "Shared files:\n";
                     for (const auto& f : files) {
-                        std::cout << "  " << f.first << " (hash: " << f.second.substr(0, 65) << "...)\n";
+                        std::cout << "  " << f.first << " (hash: " << f.second.substr(0, 16) << "...)\n";
                     }
                 }
             } else if (line.substr(0, 6) == "/find ") {
