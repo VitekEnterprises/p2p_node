@@ -136,6 +136,9 @@ public:
                 break;
             case MSG_REQUEST_BLOCK:
             case MSG_SEND_BLOCK:
+            case MSG_WEBSITE_LIST:
+            case MSG_WEBSITE_REQUEST:
+            case MSG_WEBSITE_METADATA:
                 // handled at P2PNode level (block transfer path)
                 break;
             default:

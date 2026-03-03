@@ -20,6 +20,11 @@ set(SOURCES
     src/main.cpp
     src/util/sha256.cpp
     src/network/udp_socket.cpp
+    src/web/website_metadata.cpp
+    src/web/file_store.cpp
+    src/web/html_parser.cpp
+    src/web/basic_browser.cpp
+    src/web/web_manager.cpp
 )
 
 # Header directories

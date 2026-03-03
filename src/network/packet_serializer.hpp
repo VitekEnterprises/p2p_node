@@ -25,7 +25,10 @@ enum MessageType : uint8_t {
     MSG_HASH_LIST = 0x12,
     MSG_USER_REGISTRY_REQUEST = 0x13,
     MSG_USER_REGISTRY = 0x14,
-    MSG_USER_ANNOUNCE = 0x15
+    MSG_USER_ANNOUNCE = 0x15,
+    MSG_WEBSITE_LIST = 0x16,
+    MSG_WEBSITE_REQUEST = 0x17,
+    MSG_WEBSITE_METADATA = 0x18
 };
 
 class PacketSerializer {
@@ -148,6 +151,33 @@ public:
         for (const auto& h : hashes) {
             packet.insert(packet.end(), h.begin(), h.end());
         }
+        return packet;
+    }
+
+    static std::vector<uint8_t> createWebsiteList(const NodeId& sender,
+                                                  const std::vector<uint8_t>& payload) {
+        std::vector<uint8_t> packet;
+        packet.push_back(MSG_WEBSITE_LIST);
+        packet.insert(packet.end(), sender.begin(), sender.end());
+        packet.insert(packet.end(), payload.begin(), payload.end());
+        return packet;
+    }
+
+    static std::vector<uint8_t> createWebsiteRequest(const NodeId& sender,
+                                                     const std::vector<uint8_t>& payload) {
+        std::vector<uint8_t> packet;
+        packet.push_back(MSG_WEBSITE_REQUEST);
+        packet.insert(packet.end(), sender.begin(), sender.end());
+        packet.insert(packet.end(), payload.begin(), payload.end());
+        return packet;
+    }
+
+    static std::vector<uint8_t> createWebsiteMetadata(const NodeId& sender,
+                                                      const std::vector<uint8_t>& payload) {
+        std::vector<uint8_t> packet;
+        packet.push_back(MSG_WEBSITE_METADATA);
+        packet.insert(packet.end(), sender.begin(), sender.end());
+        packet.insert(packet.end(), payload.begin(), payload.end());
         return packet;
     }
     

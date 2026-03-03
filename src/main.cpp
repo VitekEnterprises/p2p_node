@@ -40,6 +40,9 @@ void printHelp() {
               << "  /downloaded     - Show downloaded files (stored in downloaded.dat)\n"
               << "  /shared         - Show shared files (stored in shared.dat)\n"
               << "  /users          - Show known hardwareID->nickname mappings (users.dat)\n"
+              << "  /makeweb <path> - Publish decentralized website from folder (index.html required)\n"
+              << "  /websites       - List known decentralized websites\n"
+              << "  /web <domain>   - Open decentralized website by domain\n"
               << "  /find <hash>    - Find who online has a specific file\n"
               << "  /share <file> [public|private]   - Share a file\n"
               << "  /download <hash> - Download a file\n"
@@ -283,6 +286,42 @@ int main(int argc, char* argv[]) {
                         std::cout << " " << u.first << " -> " << u.second << "\n";
                     }
                     std::cout << "Total users: " << users.size() << "\n\n";
+                }
+
+            } else if (line.substr(0, 9) == "/makeweb ") {
+                std::string path = line.substr(9);
+                if (g_node->makeWebsite(path)) {
+                    std::cout << "Website published successfully\n";
+                } else {
+                    std::cout << "Failed to publish website\n";
+                }
+
+            } else if (line == "/websites") {
+                auto sites = g_node->getWebsites();
+                if (sites.empty()) {
+                    std::cout << "No websites known\n";
+                } else {
+                    std::cout << "\n=== Known Websites ===\n";
+                    std::cout << "--------------------------------------------------------------------------------\n";
+                    std::cout << " Domain                       | Owner (public key hash)                      | Timestamp\n";
+                    std::cout << "-----------------------------|-----------------------------------------------|----------------\n";
+                    for (const auto& s : sites) {
+                        std::string dom = s.domain;
+                        if (dom.size() > 27) dom = dom.substr(0, 24) + "...";
+                        std::string owner = s.ownerPublicKey;
+                        if (owner.size() > 45) owner = owner.substr(0, 45);
+                        std::cout << " " << std::left << std::setw(28) << dom
+                                  << " | " << std::left << std::setw(45) << owner
+                                  << " | " << s.timestamp << "\n";
+                    }
+                    std::cout << "--------------------------------------------------------------------------------\n";
+                    std::cout << "Total websites: " << sites.size() << "\n\n";
+                }
+
+            } else if (line.substr(0, 5) == "/web ") {
+                std::string domain = line.substr(5);
+                if (!g_node->openWebsite(domain)) {
+                    std::cout << "Failed to open website (unknown domain or download/render error)\n";
                 }
 
             } else if (line.substr(0, 6) == "/find ") {

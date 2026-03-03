@@ -5,6 +5,8 @@
 #include "dht/dht_protocol.hpp"
 #include "nat/hole_punch.hpp"
 #include "storage/block_store.hpp"
+#include "web/web_manager.hpp"
+#include "web/basic_browser.hpp"
 #include "util/sha256.hpp"
 #include "util/random.hpp"
 #include <thread>
@@ -175,7 +177,8 @@ public:
           routingTable_(nodeId_),
           dht_(socket_, routingTable_, nodeId_),
           holePuncher_(socket_, nodeId_),
-          blockStore_(storagePath) {
+          blockStore_(storagePath),
+          webManager_(storagePath) {
         macAddr_ = getLocalMacAddress();
         // compute stable hardware id from system identifiers
         hwid_ = computeStableHardwareId();
@@ -212,6 +215,7 @@ public:
         loadFileList("shared.dat", sharedFiles_);
         loadHashesFromDisk();
         loadUsersFromDisk();
+        webManager_.init();
         
         Logger::info("Node initialized with ID: " + SHA256::toHex(nodeId_));
         return true;
@@ -268,10 +272,16 @@ public:
     }
     
     bool shareFile(const std::string& filepath, bool isPublic = false) {
+        Sha256Hash outHash{};
+        return shareFileWithHash(filepath, isPublic, outHash);
+    }
+
+    bool shareFileWithHash(const std::string& filepath, bool isPublic, Sha256Hash& outHash) {
         FileMetadata metadata;
         if (!blockStore_.storeFile(filepath, metadata)) {
             return false;
         }
+        outHash = metadata.fileHash;
         // inform user of the hash needed for download
         std::string hashStr = SHA256::toHex(metadata.fileHash);
         Logger::info("Shared file hash: " + hashStr);
@@ -432,28 +442,98 @@ public:
         Logger::info("Downloading " + filename + " (" + std::to_string(meta.totalBlocks) + " blocks, blockSize=" +
                  std::to_string(meta.blockSize) + "B) from " + std::string(ipStr) + ":" + std::to_string(ntohs(target.sin_port)));
         
-        // request all blocks sequentially with retry/timeout
-        for (uint32_t idx = 0; idx < meta.totalBlocks; ++idx) {
-            Sha256Hash bh = meta.blockHashes[idx];
-            bool received = blockStore_.hasBlock(bh);
-            int tries = 0;
-            while (!received && tries < 60) { // ~30s max per block
-                auto packet = PacketSerializer::createRequestBlock(nodeId_, fileHash, idx);
-                socket_.sendTo(packet.data(), packet.size(), target);
-                std::this_thread::sleep_for(std::chrono::milliseconds(500));
-                received = blockStore_.hasBlock(bh);
-                tries++;
-            }
-            if (!received) {
-                Logger::error("Timeout waiting for block " + std::to_string(idx + 1) +
-                              "/" + std::to_string(meta.totalBlocks));
-                std::cout << std::endl;
-                return;
+        // pipelined request loop (sliding window) with adaptive retries
+        const uint32_t windowSize = std::min<uint32_t>(64, std::max<uint32_t>(8, meta.totalBlocks / 20));
+        const int maxRetriesPerBlock = 300;
+        const auto resendInterval = std::chrono::milliseconds(120);
+
+        std::vector<bool> received(meta.totalBlocks, false);
+        std::vector<int> retries(meta.totalBlocks, 0);
+        std::vector<std::chrono::steady_clock::time_point> lastRequest(meta.totalBlocks);
+
+        uint32_t nextToRequest = 0;
+        uint32_t completed = 0;
+        uint32_t inFlight = 0;
+
+        auto startedAt = std::chrono::steady_clock::now();
+        auto lastUi = startedAt;
+        uint64_t lastUiBytes = 0;
+        double smoothedKbps = 0.0;
+
+        while (completed < meta.totalBlocks) {
+            // keep pipeline full
+            while (nextToRequest < meta.totalBlocks && inFlight < windowSize) {
+                if (!received[nextToRequest]) {
+                    auto packet = PacketSerializer::createRequestBlock(nodeId_, fileHash, nextToRequest);
+                    socket_.sendTo(packet.data(), packet.size(), target);
+                    lastRequest[nextToRequest] = std::chrono::steady_clock::now();
+                    retries[nextToRequest] = 1;
+                    inFlight++;
+                }
+                nextToRequest++;
             }
 
-            double percent = (static_cast<double>(idx + 1) * 100.0) / static_cast<double>(meta.totalBlocks);
-            std::cout << "\r[INFO] Download progress: " << (idx + 1) << "/" << meta.totalBlocks
-                      << " (" << std::fixed << std::setprecision(1) << percent << "%)" << std::flush;
+            auto now = std::chrono::steady_clock::now();
+
+            // scan requested range for arrivals / retransmissions
+            for (uint32_t idx = completed; idx < nextToRequest; ++idx) {
+                if (received[idx]) continue;
+
+                if (blockStore_.hasBlock(meta.blockHashes[idx])) {
+                    received[idx] = true;
+                    if (inFlight > 0) inFlight--;
+                    continue;
+                }
+
+                if (retries[idx] > 0 && now - lastRequest[idx] >= resendInterval) {
+                    if (retries[idx] >= maxRetriesPerBlock) {
+                        Logger::error("Timeout waiting for block " + std::to_string(idx + 1) +
+                                      "/" + std::to_string(meta.totalBlocks));
+                        std::cout << std::endl;
+                        return;
+                    }
+                    auto packet = PacketSerializer::createRequestBlock(nodeId_, fileHash, idx);
+                    socket_.sendTo(packet.data(), packet.size(), target);
+                    lastRequest[idx] = now;
+                    retries[idx]++;
+                }
+            }
+
+            // advance contiguous completion pointer
+            while (completed < meta.totalBlocks && received[completed]) {
+                completed++;
+            }
+
+            // one-line UI update (throttled)
+            if (now - lastUi >= std::chrono::milliseconds(200) || completed == meta.totalBlocks) {
+                uint64_t bytesDone = static_cast<uint64_t>(completed) * static_cast<uint64_t>(meta.blockSize);
+                if (bytesDone > meta.filesize) bytesDone = meta.filesize;
+
+                double dt = std::chrono::duration_cast<std::chrono::milliseconds>(now - lastUi).count() / 1000.0;
+                if (dt > 0.0) {
+                    double instKbps = (static_cast<double>(bytesDone - lastUiBytes) / 1024.0) / dt;
+                    if (smoothedKbps == 0.0) smoothedKbps = instKbps;
+                    else smoothedKbps = smoothedKbps * 0.85 + instKbps * 0.15;
+                }
+
+                double percent = (static_cast<double>(completed) * 100.0) / static_cast<double>(meta.totalBlocks);
+                double elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - startedAt).count() / 1000.0;
+                double eta = (smoothedKbps > 0.1)
+                    ? ((static_cast<double>(meta.filesize - bytesDone) / 1024.0) / smoothedKbps)
+                    : 0.0;
+
+                std::cout << "\r[INFO] Download progress: " << completed << "/" << meta.totalBlocks
+                          << " (" << std::fixed << std::setprecision(1) << percent << "%)"
+                          << "  speed=" << std::setprecision(1) << smoothedKbps << " kB/s"
+                          << "  elapsed=" << std::setprecision(1) << elapsed << "s"
+                          << "  eta=" << std::setprecision(1) << eta << "s"
+                          << std::flush;
+
+                lastUi = now;
+                lastUiBytes = bytesDone;
+            }
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
         std::cout << std::endl;
         // reconstruct file from downloaded block hashes in metadata
@@ -576,6 +656,15 @@ public:
         }
     }
 
+    void syncWebsites() {
+        auto payload = webManager_.createWebsiteListPayload();
+        auto peers = routingTable_.getAllNodes();
+        for (const auto& n : peers) {
+            auto packet = PacketSerializer::createWebsiteList(nodeId_, payload);
+            socket_.sendTo(packet.data(), packet.size(), n.addr);
+        }
+    }
+
     // find which online peers have a specific hash
     std::vector<std::string> findOnlineOwners(const Sha256Hash& fileHash) const {
         // Note: getOwners method needs to be added to DHTProtocol
@@ -666,6 +755,49 @@ public:
         return out;
     }
 
+    struct WebsiteEntry {
+        std::string domain;
+        std::string ownerPublicKey;
+        uint64_t timestamp;
+        std::string rootFileHash;
+    };
+
+    bool makeWebsite(const std::string& folderPath) {
+        bool ok = webManager_.makeWeb(folderPath,
+            [this](const std::string& filePath, bool isPublic, Sha256Hash& outHash) {
+                return this->shareFileWithHash(filePath, isPublic, outHash);
+            });
+        if (ok) syncWebsites();
+        return ok;
+    }
+
+    std::vector<WebsiteEntry> getWebsites() const {
+        auto all = webManager_.listWebsites();
+        std::vector<WebsiteEntry> out;
+        for (const auto& w : all) {
+            out.push_back({w.domain, w.owner_public_key, w.timestamp, w.root_file_hash});
+        }
+        return out;
+    }
+
+    bool openWebsite(const std::string& domain) {
+        std::string rendered;
+        std::string rawHtml;
+        bool ok = webManager_.openWeb(domain,
+            [this](const Sha256Hash& hash, const std::string& savePath) {
+                this->downloadFile(hash, savePath);
+            },
+            rendered,
+            rawHtml);
+        if (ok) {
+            if (!BasicBrowser::open(domain, rendered, rawHtml)) {
+                Logger::warn("Native browser window is not available, showing terminal fallback renderer");
+                std::cout << rendered << std::endl;
+            }
+        }
+        return ok;
+    }
+
     // users.dat persistence helpers
     std::unordered_map<std::string, std::string> loadUsersFile(const std::string& path) {
         std::unordered_map<std::string, std::string> out;
@@ -724,6 +856,7 @@ private:
     DHTProtocol dht_;
     HolePuncher holePuncher_;
     BlockStore blockStore_;
+    WebManager webManager_;
     
     std::atomic<bool> running_{false};
     std::thread maintenanceThread_;
@@ -834,6 +967,7 @@ private:
             if (now - lastHashSync > std::chrono::minutes(1)) {
                 syncHashes();
                 syncUserRegistry();
+                syncWebsites();
                 refreshSavedHashes();
                 persistUserRegistryToDisk();
                 lastHashSync = now;
@@ -854,7 +988,37 @@ private:
                 handleBlockRequest(senderId, sender, payload);
             } else if (type == MSG_SEND_BLOCK) {
                 handleBlockSend(senderId, sender, payload);
+            } else if (type == MSG_WEBSITE_LIST) {
+                handleWebsiteList(sender, payload);
+            } else if (type == MSG_WEBSITE_REQUEST) {
+                handleWebsiteRequest(sender, payload);
+            } else if (type == MSG_WEBSITE_METADATA) {
+                handleWebsiteMetadata(payload);
             }
+        }
+    }
+
+    void handleWebsiteList(const sockaddr_in& sender, const std::vector<uint8_t>& payload) {
+        auto needDomains = webManager_.processWebsiteListPayload(payload);
+        for (const auto& d : needDomains) {
+            auto reqPayload = webManager_.createWebsiteRequestPayload(d);
+            auto packet = PacketSerializer::createWebsiteRequest(nodeId_, reqPayload);
+            socket_.sendTo(packet.data(), packet.size(), sender);
+        }
+    }
+
+    void handleWebsiteRequest(const sockaddr_in& sender, const std::vector<uint8_t>& payload) {
+        std::string domain;
+        if (!webManager_.parseWebsiteRequestPayload(payload, domain)) return;
+        auto metaPayload = webManager_.createWebsiteMetadataPayload(domain);
+        if (metaPayload.empty()) return;
+        auto packet = PacketSerializer::createWebsiteMetadata(nodeId_, metaPayload);
+        socket_.sendTo(packet.data(), packet.size(), sender);
+    }
+
+    void handleWebsiteMetadata(const std::vector<uint8_t>& payload) {
+        if (webManager_.applyWebsiteMetadataPayload(payload)) {
+            Logger::info("Website metadata updated from peer sync");
         }
     }
     
