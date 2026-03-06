@@ -2,6 +2,10 @@
 
 Implementation of a peer-to-peer node with support for Kademlia DHT, NAT hole punching and distributed file sharing. Fully cross-platform (Windows + Linux).
 
+## Main Goal
+
+The main goal of this project is to build communication that can also work remotely over radio waves.
+
 ## Features
 
 - **DHT (Distributed Hash Table)** - Kademlia implementation
@@ -170,6 +174,7 @@ The code automatically detects the operating system and uses the appropriate API
 
 ## Future improvements
 
+- [ ] Enable remote communication over radio waves (main project goal)
 - [ ] TCP fallback for larger packets
 - [ ] Iterative search (ALPHA = 3)
 - [ ] Bucket refresh after timeout
